@@ -215,6 +215,148 @@ For more on the breeding paradigm, see [AI-Writings](https://github.com/SuperIns
 | [baton](https://github.com/SuperInstance/baton) | Generational handoff (connects pedigree generations) |
 | [vetcheck](https://github.com/SuperInstance/vetcheck) | Health checks for registered models |
 
+
+
+## Pedigree vs Lineage Tracker: When to Use Which
+
+Both [Pedigree](https://github.com/SuperInstance/pedigree) and [Lineage Tracker](https://github.com/SuperInstance/lineage-tracker) track model ancestry. They're complementary tools with different primary strengths:
+
+| Concern | Pedigree | Lineage Tracker |
+|---------|----------|----------------|
+| **Mental model** | Breeder's studbook | MLOps audit trail |
+| **Inbreeding coefficient** | ✅ Wright's coefficient of relationship | ❌ Trait diversity only |
+| **Visualization** | ✅ ASCII trees + GraphViz DOT | ❌ Programmatic queries only |
+| **Merge safety check** | ✅ Pre-merge inbreeding screening | ❌ Post-hoc trait comparison |
+| **Rich training metadata** | Basic (method, notes) | ✅ Full (LoRA rank, LR, epochs, merge strategy) |
+| **Outcross recommendations** | ✅ Diversity-scored partners | ✅ Criteria-based recommendations |
+| **Best for** | "Is this merge genetically safe?" | "What hyperparameters produced this model?" |
+
+**Rule of thumb:** Use Pedigree *before* a merge to check for inbreeding. Use Lineage Tracker *after* a fine-tune to record what happened. Use both for a complete breeding program.
+
+## Advanced Scenario: Merge Planning
+
+```python
+from pedigree import Pedigree
+
+p = Pedigree("lineage.json")
+
+# You want to merge two community fine-tunes
+# Check if they're too closely related first
+model_a = "noromaid-70b"          # creative writing FT
+model_b = "openchat-3.5-70b"      # conversation FT
+
+coeff = p.check_inbreeding(model_a, model_b)
+print(f"Inbreeding coefficient: {coeff:.2%}")
+
+if coeff > 0.25:
+    print("⚠ HIGH INBREEDING — merge will likely reinforce shared weaknesses")
+    print("  Recommendations for outcrossing:")
+    recs = p.recommend_breeding(model_a)
+    for r in recs[:5]:
+        print(f"    {r.model_id}: diversity={r.diversity_score:.2f}")
+        print(f"      common ancestors: {r.common_ancestors}")
+else:
+    print("✓ Safe to merge — diverse enough bloodlines")
+```
+
+### Multi-Generation Visualization
+
+```python
+from pedigree import Pedigree
+
+p = Pedigree("breeding-program.json")
+
+# Register a 4-generation breeding program
+p.register("llama-3-70b", method="pretrain", notes="Foundation")
+p.register("instruct-v1", sire="llama-3-70b", method="sft", notes="Instruction tuning")
+p.register("code-v1", sire="llama-3-70b", method="sft", notes="Code specialization")
+p.register("reasoning-v1", sire="llama-3-70b", method="rlhf", notes="Reasoning focus")
+p.register("instruct-code-v2", sire="instruct-v1", dam="code-v1", method="merge",
+           notes="SLERP merge: instruction + code")
+p.register("instruct-reasoning-v2", sire="instruct-v1", dam="reasoning-v1", method="merge",
+           notes="SLERP merge: instruction + reasoning")
+p.register("apex-v3", sire="instruct-code-v2", dam="instruct-reasoning-v2", method="merge",
+           notes="Triple-merge: code + instruction + reasoning")
+
+# Visualize the full tree
+p.print_lineage("apex-v3", max_generations=5)
+# ═══════════════════════════════════════════════════
+#   Bloodline: apex-v3
+# ═══════════════════════════════════════════════════
+#   Gen 3: apex-v3 (merge)
+#   ├── Gen 2: instruct-code-v2 (merge)
+#   │   ├── Gen 1: instruct-v1 (sft)
+#   │   │   └── Gen 0: llama-3-70b (pretrain)
+#   │   └── Gen 1: code-v1 (sft)
+#   │       └── Gen 0: llama-3-70b (pretrain)
+#   └── Gen 2: instruct-reasoning-v2 (merge)
+#       ├── Gen 1: instruct-v1 (sft)
+#       │   └── Gen 0: llama-3-70b (pretrain)
+#       └── Gen 1: reasoning-v1 (rlhf)
+#           └── Gen 0: llama-3-70b (pretrain)
+# ═══════════════════════════════════════════════════
+
+# Check inbreeding on the final merge
+coeff = p.check_inbreeding("instruct-code-v2", "instruct-reasoning-v2")
+print(f"Pre-merge inbreeding: {coeff:.2%}")
+# → 50.00% (both share instruct-v1 and llama-3-70b as ancestors)
+# This is expected — they're half-siblings through instruct-v1
+
+# Export for a presentation
+p.export_dot("apex-v3", "breeding_tree.dot")
+# dot -Tpng breeding_tree.dot -o breeding_tree.png
+```
+
+### Fleet Diversity Audit
+
+```python
+from pedigree import Pedigree
+
+p = Pedigree("fleet.json")
+
+# Get all models in the fleet
+all_models = p.get_all_models()
+
+# Find the foundation models (roots of all trees)
+founders = [m for m in all_models if m.sire is None and m.dam is None]
+print(f"Foundation models ({len(founders)}):")
+for f in founders:
+    descendants = p.get_descendants(f.id)
+    print(f"  {f.id}: {len(descendants)} descendants")
+
+# Check pairwise inbreeding across the fleet
+print("\nFleet inbreeding matrix:")
+for i, a in enumerate(all_models):
+    for b in all_models[i+1:]:
+        coeff = p.check_inbreeding(a.id, b.id)
+        if coeff > 0.3:
+            print(f"  ⚠ {a.id} × {b.id}: {coeff:.2%}")
+
+# Recommend the most diverse pairings
+print("\nMost diverse pairings for next breeding cycle:")
+for model in all_models[:3]:
+    recs = p.recommend_breeding(model)
+    if recs:
+        best = recs[0]
+        print(f"  {model.id} × {best.model_id}: diversity={best.diversity_score:.2f}")
+```
+
+## The Inbreeding Coefficient Explained
+
+The inbreeding coefficient is the most important number Pedigree computes. Here's what it means in practice:
+
+| Coefficient | Animal Breeding Interpretation | Model Breeding Interpretation |
+|-------------|-------------------------------|-------------------------------|
+| **0%** | Completely unrelated | No shared base model ancestry |
+| **6.25%** | First cousins once removed | Distant lineage overlap |
+| **12.5%** | Half-siblings or uncle/niece | One shared parent model |
+| **25%** | Full siblings or parent/child | Very close — will reinforce shared traits |
+| **50%+** | Highly inbred (problematic) | Same base model, likely to amplify weaknesses |
+
+**What this means for merges:** When you merge two models with a high inbreeding coefficient, you're not adding new capabilities — you're reinforcing what both models already share. This is good if what they share is a strength. It's catastrophic if what they share is a weakness (e.g., both can't do math, both hallucinate on dates, both share a tokenizer bug).
+
+The outcross recommendation system finds models from *different* bloodlines — maximizing the chance that what one model lacks, the other provides. This is how animal breeders produce healthy offspring: not by breeding the best to the best, but by breeding complementary to complementary.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
